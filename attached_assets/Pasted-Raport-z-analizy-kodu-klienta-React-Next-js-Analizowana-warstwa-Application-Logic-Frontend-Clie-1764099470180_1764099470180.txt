@@ -1,0 +1,136 @@
+Raport z analizy kodu klienta (React/Next.js).
+Analizowana warstwa: Application Logic (Frontend/Client-Side Rendering).
+
+Twoim wrogiem w tym kodzie jest Main Thread Blocking oraz sztuczne opóźnianie renderowania (UI Animation Lag). Kod przedkłada estetykę ("smooth scroll") nad surową prędkość przekazu danych. W systemach Real-Time nie ma czasu na animacje.
+
+Oto raport "ZNAJDŹ I ZNISZCZ":
+
+1. Lokalizacja: ComputerInvocation / handleImageLoad
+
+Lokalizacja: Linie ~204-206
+
+code
+TypeScript
+download
+content_copy
+expand_less
+const handleImageLoad = () => {
+  if (imgRef.current) {
+    imgRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }
+};
+
+Problem: Użycie behavior: 'smooth'.
+Przeglądarka interpoluje pozycję przewijania przez kilkaset milisekund (zależnie od OS/przeglądarki). W trakcie szybkiego strumieniowania (np. serii screenshotów lub logów), kolejka animacji scrollowania zatyka się, powodując, że użytkownik widzi dane z opóźnieniem, mimo że pakiety już dotarły. To jest sztuczny lag UI.
+
+Wpływ na streaming: Opóźnienie wizualne rzędu 300-500ms przy każdym nowym elemencie. Przy dużej częstotliwości aktualizacji interfejs staje się "pływający" i nieprecyzyjny.
+
+AKCJA: ZNISZCZYĆ animację. Przewijanie ma być atomowe (natychmiastowe).
+Zmień na:
+
+code
+TypeScript
+download
+content_copy
+expand_less
+const handleImageLoad = () => {
+  if (imgRef.current) {
+    // FORCE IMMEDIATE JUMP
+    imgRef.current.scrollIntoView({ behavior: 'instant', block: 'end' });
+  }
+};
+2. Lokalizacja: ComputerInvocation / <img> onLoad
+
+Lokalizacja: Linia ~234
+
+code
+TypeScript
+download
+content_copy
+expand_less
+<img
+  ref={imgRef}
+  src={`data:image/png;base64,${result.data}`}
+  alt="Screenshot"
+  className="w-full object-contain"
+  onLoad={handleImageLoad} // <--- TU JEST WRÓG
+/>
+
+Problem: Uzależnienie przewinięcia widoku (scrollIntoView) od zdarzenia onLoad.
+Dekodowanie dużych ciągów Base64 na wątku głównym jest kosztowne. Przeglądarka musi: pobrać dane, zdekodować Base64, namalować bitmapę (Paint), i dopiero wtedy odpala onLoad. Użytkownik widzi stary ekran, podczas gdy nowy jest już w pamięci, ale czeka na rendering.
+
+Wpływ na streaming: Zmienne opóźnienie (jitter) zależne od rozmiaru obrazka i obciążenia CPU. Blokuje natychmiastową reakcję oka na nowy content.
+
+AKCJA: Odseparuj logikę przewijania od renderowania bitmapy. Przewiń widok w momencie zamontowania komponentu w DOM (useEffect), nie czekając na dekoder graficzny.
+
+Zastosuj useEffect zamiast onLoad:
+
+code
+TypeScript
+download
+content_copy
+expand_less
+// Dodaj import useEffect z 'react'
+import { useEffect, useRef } from "react";
+
+// Wewnątrz ComputerInvocation:
+useEffect(() => {
+    // Natychmiastowy skok po otrzymaniu danych, bez czekania na render pikseli
+    if (imgRef.current && result?.data) {
+        imgRef.current.scrollIntoView({ behavior: 'instant', block: 'end' });
+    }
+}, [result?.data]); // Reaguj na zmianę danych
+
+// W JSX usuń onLoad:
+<img
+  ref={imgRef}
+  src={`data:image/png;base64,${result.data}`}
+  alt="Screenshot"
+  className="w-full object-contain"
+  // onLoad usuwamy całkowicie
+/>
+3. Lokalizacja: AITextMessage / Markdown
+
+Lokalizacja: Komponent AITextMessage (linie ~365-375) oraz jego użycie w PreviewMessage.
+
+Problem: Brak memoizacji (React.memo) dla ciężkich komponentów tekstowych.
+Przy strumieniowaniu tekstu (token po tokenie), React przerenderowuje całe drzewo wiadomości. Parsowanie Markdown (<Markdown>{text}</Markdown>) jest operacją kosztowną obliczeniowo (CPU bound). Jeśli strumień jest szybki, wątek główny dławi się ciągłym parsowaniem całego tekstu od nowa przy każdej literze.
+
+Wpływ na streaming: Mikro-przycięcia (stuttering) przy renderowaniu długich odpowiedzi, wzrost zużycia CPU, możliwe gubienie klatek przy scrollowaniu.
+
+AKCJA: Wymuś memoizację gotowych fragmentów, aby renderować tylko różnicę (diff). Jeśli nie możesz zmienić architektury, przynajmniej wyłącz zbędne wrappery.
+
+W tym przypadku, najszybszą poprawką "in-place" jest optymalizacja renderowania w PreviewMessage poprzez usunięcie zbędnych zagnieżdżeń, które React musi rekurencyjnie sprawdzać.
+
+Zmień AITextMessage na wersję z memoizacją propsów (jeśli text się nie zmienia, nie renderuj):
+
+code
+TypeScript
+download
+content_copy
+expand_less
+import { memo } from "react";
+
+// Zastosuj memo, aby zablokować re-renderowanie starych wiadomości podczas streamowania nowych
+const AITextMessage = memo(function AITextMessage({ text }: { text: string }) {
+  return (
+    <ChainOfThoughtStep defaultOpen={true}>
+      <ChainOfThoughtContent>
+        <div className="w-full break-words max-w-full">
+          <Markdown>{text}</Markdown>
+        </div>
+      </ChainOfThoughtContent>
+    </ChainOfThoughtStep>
+  );
+}, (prev, next) => prev.text === next.text);
+PODSUMOWANIE
+
+Twoja aplikacja frontendowa dławi się na estetyce.
+
+Zmień smooth na instant.
+
+Wywal onLoad przy scrollowaniu.
+
+Zmemoizuj AITextMessage.
+
+Wykonaj to natychmiast. Opóźnienie jest nieakceptowalne.

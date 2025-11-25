@@ -1,0 +1,100 @@
+1. Konfiguracja next.config.js (Serce systemu)
+To najważniejszy plik. Musisz go zastąpić poniższą konfiguracją, która wymusza nagłówki akceptujące wszystko.
+code
+JavaScript
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  // 1. Wyłącz Strict Mode (czasami wykrywa błędy side-effects)
+  reactStrictMode: false,
+
+  // 2. Wyłącz nagłówek informujący o technologii (opcjonalne, ale dla czystości)
+  poweredByHeader: false, 
+
+  // 3. Wyłącz sprawdzanie typów i ESLint podczas budowania (żeby błędy security nie blokowały builda)
+  typescript: { ignoreBuildErrors: true },
+  eslint: { ignoreDuringBuilds: true },
+
+  // 4. Otwórz moduł obrazów na oścież
+  images: {
+    unoptimized: true, // Wyłącz optymalizację serwera Next.js (ładuje oryginały)
+    remotePatterns: [  // Pozwól na ładowanie obrazów z DOWOLNEJ domeny http/https
+      { protocol: "https", hostname: "**" },
+      { protocol: "http", hostname: "**" },
+    ],
+    dangerouslyAllowSVG: true, // Pozwól na SVG (mogą zawierać skrypty)
+    contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;", // Nadpisz domyślne CSP obrazów
+  },
+
+  // 5. Globalne nagłówki HTTP (CORS + Security Headers Removal)
+  async headers() {
+    return [
+      {
+        source: "/:path*", // Dotyczy KAŻDEJ ścieżki w aplikacji
+        headers: [
+          // Zezwolenie na CORS dla każdego
+          { key: "Access-Control-Allow-Credentials", value: "true" },
+          { key: "Access-Control-Allow-Origin", value: "*" }, 
+          { key: "Access-Control-Allow-Methods", value: "GET,OPTIONS,PATCH,DELETE,POST,PUT" },
+          { key: "Access-Control-Allow-Headers", value: "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization" },
+          
+          // WYŁĄCZENIE nagłówków bezpieczeństwa przeglądarki
+          { key: "X-DNS-Prefetch-Control", value: "off" },
+          { key: "X-XSS-Protection", value: "0" }, // Wyłącz filtr XSS w przeglądarce
+          { key: "X-Frame-Options", value: "ALLOWALL" }, // Pozwól na wrzucanie strony w iframe (clickjacking)
+          { key: "X-Content-Type-Options", value: "nosniff" }, // (zostawienie tego często pomaga uniknąć błędów MIME, ale można usunąć w zależności od potrzeb)
+          { key: "Referrer-Policy", value: "unsafe-url" }, // Przesyłaj pełny referrer wszędzie
+          // Nadpisanie Content-Security-Policy na takie, które pozwala na wszystko (inline scripts, eval, external sources)
+          { key: "Content-Security-Policy", value: "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;" }
+        ],
+      },
+    ];
+  },
+};
+
+module.exports = nextConfig;
+2. Middleware (middleware.ts / src/middleware.ts)
+Middleware stoi przed każdą stroną. Masz dwie opcje:
+Opcja A (Najlepsza): Usuń całkowicie plik middleware.ts. Jeśli go nie ma, Next.js nie blokuje niczego na tym poziomie.
+Opcja B (Jeśli musisz go mieć): Musisz dynamicznie ustawiać Origin, ponieważ statyczne * w configu czasami gryzie się z credentials: true w niektórych przeglądarkach.
+code
+TypeScript
+// middleware.ts
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+
+export function middleware(request: NextRequest) {
+  const response = NextResponse.next()
+  
+  // Pobieramy origin żądającego i odsyłamy mu "Tak, to ty jesteś dozwolony"
+  const origin = request.headers.get('origin') ?? '*'
+  
+  response.headers.set('Access-Control-Allow-Origin', origin)
+  response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+  response.headers.set('Access-Control-Allow-Headers', '*')
+  response.headers.set('Access-Control-Allow-Credentials', 'true')
+
+  return response
+}
+
+export const config = { matcher: '/:path*' }
+3. Czyszczenie kodu aplikacji (Frontend)
+Sprawdź te miejsca w kodzie Reacta:
+Layout / _document.js: Przeszukaj pliki app/layout.tsx lub pages/_document.js. Usuń wszelkie tagi <meta> definiujące Content-Security-Policy.
+Biblioteki Auth: Jeśli używasz NextAuth.js (Auth.js) lub Clerk:
+Usuń wrappery autoryzacji z layoutów.
+W pliku konfiguracyjnym NextAuth ustaw debug: true i upewnij się, że nie wymuszasz secure: true dla ciasteczek (cookies), jeśli działasz na HTTP (opcja useSecureCookies: false).
+4. API Routes (Backend)
+Dla każdego endpointu API (app/api/... lub pages/api/...), jeśli klient wysyła zapytanie z innej domeny, przeglądarka najpierw wyśle zapytanie OPTIONS (preflight). Musisz na nie odpowiedzieć 200 OK.
+W App Router (app/api/route.ts), dodaj to do każdego pliku route (lub stwórz jeden generyczny handler):
+code
+TypeScript
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 200,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': '*',
+    },
+  })
+}

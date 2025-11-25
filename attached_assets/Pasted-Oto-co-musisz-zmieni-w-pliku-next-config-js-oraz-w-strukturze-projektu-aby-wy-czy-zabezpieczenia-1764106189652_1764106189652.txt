@@ -1,0 +1,107 @@
+Oto co musisz zmienić w pliku next.config.js oraz w strukturze projektu, aby wyłączyć zabezpieczenia:
+1. Wyłączenie CORS i blokad w next.config.js
+Edytuj plik next.config.js w głównym katalogu projektu. Musisz nadpisać nagłówki HTTP, aby przeglądarka akceptowała żądania z dowolnego źródła.
+code
+JavaScript
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  // Wyłączenie trybu ścisłego Reacta (czasami powoduje podwójne renderowanie w dev)
+  reactStrictMode: false,
+
+  // Wyłączenie zabezpieczeń optymalizacji obrazów (pozwala na ładowanie obrazów zewsząd)
+  images: {
+    unoptimized: true,
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "**",
+      },
+      {
+        protocol: "http",
+        hostname: "**",
+      },
+    ],
+    dangerouslyAllowSVG: true,
+    contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;",
+  },
+
+  // Dodanie nagłówków pozwalających na wszystko (CORS "wildcard")
+  async headers() {
+    return [
+      {
+        // Pasuje do wszystkich ścieżek API i stron
+        source: "/:path*",
+        headers: [
+          { key: "Access-Control-Allow-Credentials", value: "true" },
+          { key: "Access-Control-Allow-Origin", value: "*" }, // UWAGA: w niektórych przypadkach '*' gryzie się z Credentials=true, wtedy trzeba dynamicznie ustawiać origin
+          { key: "Access-Control-Allow-Methods", value: "GET,OPTIONS,PATCH,DELETE,POST,PUT" },
+          { key: "Access-Control-Allow-Headers", value: "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization" },
+        ],
+      },
+    ];
+  },
+};
+
+module.exports = nextConfig;
+Uwaga dot. CORS: Jeśli używasz Access-Control-Allow-Credentials: true, przeglądarki mogą odrzucić Access-Control-Allow-Origin: *. W takim przypadku musisz użyć Middleware (punkt 2), aby dynamicznie wpisywać origin żądającego.
+2. Wyłączenie lub modyfikacja Middleware (middleware.ts)
+Next.js często używa pliku middleware.ts (lub .js) w katalogu src/ lub w głównym katalogu do sprawdzania autoryzacji, firewalli lub przekierowań.
+Opcja A: Całkowite usunięcie
+Po prostu usuń plik middleware.ts.
+Opcja B: Przepuszczanie wszystkiego (Permissive CORS w Middleware)
+Jeśli musisz mieć middleware, ale chcesz zezwolić na wszystko:
+code
+TypeScript
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+
+export function middleware(request: NextRequest) {
+  // Pobierz origin z żądania, aby oszukać przeglądarkę
+  const origin = request.headers.get('origin') || '*'
+  
+  const response = NextResponse.next()
+
+  // Nadpisz nagłówki w odpowiedzi
+  response.headers.set('Access-Control-Allow-Origin', origin)
+  response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+  response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  response.headers.set('Access-Control-Allow-Credentials', 'true')
+
+  return response
+}
+
+export const config = {
+  matcher: '/:path*',
+}
+3. API Routes (katalog pages/api lub app/api)
+Upewnij się, że w swoich endpointach API nie masz żadnych funkcji typu authOptions, getSession, czy sprawdzania tokenów JWT. Next.js sam z siebie nie blokuje API, chyba że kod wewnątrz handlera to robi.
+Przykład całkowicie otwartego handlera (App Router):
+code
+TypeScript
+// app/api/test/route.ts
+import { NextResponse } from 'next/server';
+
+export async function GET() {
+  return NextResponse.json(
+    { message: "Unsafe access allowed" },
+    {
+      status: 200,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      },
+    }
+  );
+}
+
+// Obsługa preflight request dla CORS
+export async function OPTIONS() {
+  return NextResponse.json({}, {
+    headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    }
+  })
+}

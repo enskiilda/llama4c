@@ -1,0 +1,97 @@
+1. Wymuszenie trybu dynamicznego w całym projekcie (App Router)
+W pliku app/layout.tsx (lub .js) – czyli w głównym layoucie całej aplikacji – dodaj poniższy kod na samej górze. Sprawi to, że każda strona w aplikacji będzie traktowana jako dynamiczna (serwerowa), a nie statyczna.
+code
+TypeScript
+// app/layout.tsx
+
+// 1. Wymuś dynamiczne renderowanie (wyłącza Full Route Cache)
+export const dynamic = 'force-dynamic';
+
+// 2. Wymuś brak cachowania dla wszystkich zapytań fetch()
+export const fetchCache = 'force-no-store';
+
+// 3. Ustaw rewalidację na 0 (natychmiastowe przedawnienie)
+export const revalidate = 0;
+
+// ...reszta kodu layoutu
+export default function RootLayout({ children }) { ... }
+2. Wyłączenie cachowania przeglądarki i CDN w next.config.js
+Musisz poinstruować przeglądarkę użytkownika oraz wszelkie serwery proxy (np. Cloudflare, Vercel Edge), aby nigdy nie zapisywały odpowiedzi.
+Zaktualizuj sekcję headers w next.config.js:
+code
+JavaScript
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  // ...twoje inne opcje (np. te wyłączające zabezpieczenia z poprzedniej odpowiedzi)
+
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          // WYŁĄCZENIE CACHINGU
+          {
+            key: 'Cache-Control',
+            value: 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0'
+          },
+          {
+            key: 'Pragma',
+            value: 'no-cache'
+          },
+          {
+            key: 'Expires',
+            value: '0'
+          },
+          {
+            key: 'Surrogate-Control', 
+            value: 'no-store' // Dla niektórych CDN
+          },
+          // WYŁĄCZENIE BUFOROWANIA NGINX (jeśli używasz Nginx jako reverse proxy)
+          {
+            key: 'X-Accel-Buffering',
+            value: 'no'
+          }
+        ],
+      },
+    ]
+  },
+}
+
+module.exports = nextConfig
+3. Wyłączenie Client-side Router Cache (Pamięć podręczna nawigacji)
+Next.js (szczególnie w wersjach 13 i 14) agresywnie cache'uje przejścia między stronami w przeglądarce (nawet jeśli serwer mówi "no-store", klient trzyma wersję przez 30s-5min).
+Nie ma jednej globalnej flagi w configu, żeby to wyłączyć (jest to "feature" frameworka). Aby to obejść, masz dwie metody:
+Metoda A: Brutalna (w Middleware)
+Dodaj nagłówek, który zmusza przeglądarkę do nieużywania cache'u dla plików JSON generowanych przez Next.js (RSC payload).
+Jeśli masz plik middleware.ts (z poprzedniej odpowiedzi), upewnij się, że zawiera:
+code
+TypeScript
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+
+export function middleware(request: NextRequest) {
+  const response = NextResponse.next()
+
+  // ... (tutaj twoje nagłówki CORS z poprzedniej odpowiedzi) ...
+
+  // Dodatkowo: Zabij cache na poziomie middleware
+  response.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  response.headers.set('Pragma', 'no-cache')
+  response.headers.set('Expires', '0')
+  
+  return response
+}
+4. Wyłączenie optymalizacji obrazów (Image Optimization)
+Jeśli używasz komponentu <Image />, Next.js cache'uje przetworzone obrazy na serwerze. Aby to wyłączyć i serwować oryginały (co też zdejmuje buforowanie przetwarzania):
+W next.config.js:
+code
+JavaScript
+images: {
+  unoptimized: true, // Wyłącza system optymalizacji i cache obrazów Next.js
+},
+Podsumowanie - co to zmienia?
+Po wprowadzeniu tych zmian:
+export const dynamic = 'force-dynamic': Next.js przestanie generować statyczne pliki HTML podczas builda. Każde wejście na stronę uruchomi serwer.
+fetchCache = 'force-no-store': Każde zapytanie do bazy danych/API wewnątrz komponentów Reacta będzie wykonane na nowo przy każdym odświeżeniu.
+Headers (Cache-Control: no-store): Przeglądarka nie zapisze niczego na dysku ("Pamięć podręczna dysku") ani w RAMie. Przycisk "Wstecz" w przeglądarce wymusi ponowne pobranie strony.
+X-Accel-Buffering: no: Jeśli aplikacja stoi za Nginxem, dane będą streamowane natychmiastowo, bez czekania na zapełnienie bufora wyjściowego (ważne przy streamingu AI lub logów).
